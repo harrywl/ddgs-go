@@ -38,6 +38,20 @@ var fieldNormalizers = map[string]func(string) string{
 	"info":      normalizeText,
 }
 
+// ResultFields returns the ordered field names of a result category, matching
+// the Python dataclass field order (title, href, body for text; etc.). The
+// returned slice is a copy, safe to mutate. An unknown category yields nil.
+// Used by the CLI for CSV headers and colored printing column order.
+func ResultFields(category string) []string {
+	fields, ok := resultFields[category]
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(fields))
+	copy(out, fields)
+	return out
+}
+
 // newResult creates a Result pre-populated with the empty fields of the
 // given category, matching Python dataclass defaults.
 func newResult(category string) Result {
