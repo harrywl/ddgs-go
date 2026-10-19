@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+
+      - name: Test
+        run: |
+          gofmt -l . | (! read -r x) || { echo "gofmt needed"; gofmt -l .; exit 1; }
+          go vet ./...
+          go test ./...
+
+      # Tag is the source of truth for the release label; strip the leading v.
+      - name: Version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile
+        run: make release VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > checksums-${{ steps.ver.outputs.version }}.txt
+          cat checksums-${{ steps.ver.outputs.version }}.txt
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Go port of [deedy5/ddgs](https://github.com/deedy5/ddgs), at parity
+            with Python ddgs v9.16.0.
+
+            Binaries: `ddgs` (CLI), `ddgs-api` (HTTP API server),
+            `ddgs-mcp` (MCP stdio server).
+
+            Install from source instead:
+            ```
+            go install github.com/harrywl/ddgs-go/cmd/ddgs@${{ github.ref_name }}
+            ```
+
+            See [CHANGELOG.md](https://github.com/harrywl/ddgs-go/blob/main/CHANGELOG.md)
+            and [docs/GAP-ANALYSIS.md](https://github.com/harrywl/ddgs-go/blob/main/docs/GAP-ANALYSIS.md)
+            for the parity work in this release.

@@ -1,6 +1,14 @@
 MIT License
 
 Copyright (c) 2026 dreamyang-liu
+Copyright (c) 2026 harrywl
+
+This project is a derivative work of https://github.com/dreamyang-liu/ddgs-go,
+a Go port of https://github.com/deedy5/ddgs (MIT, Copyright (c) 2021-2026
+Igor Babin). The original copyright notices are retained above and below as
+required by the MIT license.
+
+Copyright (c) 2021-2026 Igor Babin (deedy5/ddgs, the Python original)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
