@@ -1,4 +1,4 @@
-module github.com/dreamyang-liu/ddgs-go
+module github.com/harrywl/ddgs-go
 
 go 1.25.0
 
