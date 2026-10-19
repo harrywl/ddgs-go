@@ -29,7 +29,7 @@ go install github.com/harrywl/ddgs-go/cmd/ddgs-api@latest
 go install github.com/harrywl/ddgs-go/cmd/ddgs-mcp@latest
 ```
 
-Or grab a prebuilt binary (11 platforms) from
+Or grab a prebuilt binary (linux/arm64, linux/arm, darwin/arm64) from
 [Releases](https://github.com/harrywl/ddgs-go/releases).
 
 ## Library quickstart
@@ -163,7 +163,7 @@ make build        # bin/ddgs, bin/ddgs-api, bin/ddgs-mcp
 make test         # unit tests (no network)
 make integration  # live-engine tests (-tags=integration)
 make lint         # gofmt check + go vet
-make release      # cross-compile 11 platforms into dist/
+make release      # cross-compile the release platforms into dist/
 ```
 
 Parity is enforced by golden tests: engine payloads and extraction results are

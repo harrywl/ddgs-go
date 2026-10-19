@@ -19,11 +19,10 @@ PKGS    ?= ./...
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || \
            sed -n 's/^const Version = "\(.*\)"$$/\1/p' version.go)
 BINS     = ddgs ddgs-api ddgs-mcp
-# Cross-compile matrix for `make release`.
-PLATFORMS = linux/amd64 linux/arm64 linux/arm linux/386 \
-            darwin/amd64 darwin/arm64 \
-            windows/amd64 windows/arm64 windows/386 \
-            freebsd/amd64 freebsd/arm64
+# Cross-compile matrix for `make release`: Linux ARM (64- and 32-bit) and
+# macOS Apple Silicon only. POSIX only — the CLI's `api --detach` path uses
+# setsid/signal, so Windows is not a target.
+PLATFORMS = linux/arm64 linux/arm darwin/arm64
 
 .PHONY: all build test vet fmt fmt-check lint race integration clean help release tidy
 
@@ -80,7 +79,6 @@ release:
 		os=$${p%/*}; arch=$${p#*/}; \
 		for b in $(BINS); do \
 			out=dist/$$b-$(VERSION)-$$os-$$arch; \
-			[ "$$os" = "windows" ] && out="$$out.exe"; \
 			echo "CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags '-s -w' -o $$out ./cmd/$$b"; \
 			CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags '-s -w' -o $$out ./cmd/$$b || exit 1; \
 		done; \

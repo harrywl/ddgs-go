@@ -1,2 +1,14 @@
+# build output
+bin/
+dist/
+
+# go test artifacts
 *.test
 *.out
+coverage.*
+
+# editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
