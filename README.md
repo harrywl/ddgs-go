@@ -1,16 +1,38 @@
-# ddgs-go | Dux Distributed Global Search (Go)
+# ddgs-go
 
-A Go port of the Python [ddgs](https://github.com/deedy5/ddgs) library — a
-metasearch library that aggregates results from diverse web search services,
-with an API that mirrors the Python version.
+**DDGS | Dux Distributed Global Search** — a metasearch library and toolkit in
+Go, at parity with Python [ddgs v9.16.0](https://github.com/deedy5/ddgs).
+
+One API aggregates results from multiple search engines at once:
+
+| Category | Backends |
+|---|---|
+| text | brave, duckduckgo, google, grokipedia, mojeek, startpage, wikipedia, yahoo |
+| images | bing, duckduckgo |
+| news | bing, duckduckgo, yahoo |
+| videos | duckduckgo |
+| books | annasarchive |
+
+Three binaries ship alongside the library: `ddgs` (CLI), `ddgs-api` (HTTP
+server) and `ddgs-mcp` (MCP stdio server) — the Go equivalents of Python's
+`ddgs` command, its FastAPI app and its MCP server.
 
 ## Install
 
-```bash
-go get github.com/dreamyang-liu/ddgs-go
+```sh
+# library
+go get github.com/harrywl/ddgs-go
+
+# binaries
+go install github.com/harrywl/ddgs-go/cmd/ddgs@latest
+go install github.com/harrywl/ddgs-go/cmd/ddgs-api@latest
+go install github.com/harrywl/ddgs-go/cmd/ddgs-mcp@latest
 ```
 
-## Quick start
+Or grab a prebuilt binary (11 platforms) from
+[Releases](https://github.com/harrywl/ddgs-go/releases).
+
+## Library quickstart
 
 ```go
 package main
@@ -19,133 +41,141 @@ import (
 	"context"
 	"fmt"
 
-	ddgs "github.com/dreamyang-liu/ddgs-go"
+	ddgs "github.com/harrywl/ddgs-go"
 )
 
 func main() {
-	d, err := ddgs.New(nil) // defaults: 5s timeout, no proxy, TLS verify on
+	d, err := ddgs.New(nil) // nil = defaults: no proxy (or $DDGS_PROXY), 5s timeout, TLS verify on
 	if err != nil {
 		panic(err)
 	}
-	results, err := d.Text(context.Background(), "golang concurrency", nil)
+	results, err := d.Text(context.Background(), "golang context", &ddgs.SearchOptions{
+		MaxResults: 5,
+		Region:     "us-en",
+		Backend:    "auto", // or "duckduckgo,brave,google", or "wikipedia"
+	})
 	if err != nil {
 		panic(err)
 	}
 	for _, r := range results {
-		fmt.Println(r["title"], r["href"])
+		fmt.Println(r["title"], "|", r["href"])
 	}
 }
 ```
 
-## API mapping (Python → Go)
+### API ↔ Python mapping
 
 | Python | Go |
 |---|---|
-| `DDGS(proxy=..., timeout=..., verify=...)` | `ddgs.New(&ddgs.Config{Proxy, Timeout, Verify, Threads})` |
-| `ddgs.text(query, ...)` | `d.Text(ctx, query, opts)` |
-| `ddgs.images(query, ...)` | `d.Images(ctx, query, opts)` |
-| `ddgs.news(query, ...)` | `d.News(ctx, query, opts)` |
-| `ddgs.videos(query, ...)` | `d.Videos(ctx, query, opts)` |
-| `ddgs.books(query, ...)` | `d.Books(ctx, query, opts)` |
-| `ddgs.extract(url, fmt)` | `d.Extract(ctx, url, format)` |
-| `region="us-en"` | `opts.Region` (default `"us-en"`) |
-| `safesearch="moderate"` | `opts.SafeSearch` (default `"moderate"`) |
-| `timelimit="d"/"w"/"m"/"y"` | `opts.TimeLimit` |
-| `max_results=10` | `opts.MaxResults` (default 10; `-1` = unlimited, like `None`) |
-| `page=1` | `opts.Page` |
-| `backend="auto"` | `opts.Backend` (comma-delimited, default `"auto"`) |
-| `**kwargs` (size, color, resolution, …) | `opts.Extra map[string]string` |
-| `DDGS_PROXY` env var | `DDGS_PROXY` env var (same) |
-| `proxy="tb"` Tor alias | `Proxy: "tb"` (same) |
-| `DDGSException` / `TimeoutException` | `ddgs.ErrDDGS` / `ddgs.ErrTimeout` (`errors.Is`) |
+| `DDGS(proxy=…, timeout=…, verify=…)` | `ddgs.New(&ddgs.Config{Proxy:…, Timeout:…, Verify:…})` |
+| `d.text(q, max_results=5)` | `d.Text(ctx, q, &ddgs.SearchOptions{MaxResults: 5})` |
+| `d.images/news/videos/books(…)` | `d.Images/News/Videos/Books(ctx, q, opts)` |
+| `d.extract(url, fmt="text_markdown")` | `d.Extract(ctx, url, ddgs.FormatTextMarkdown)` |
+| `max_results=None` (everything) | `MaxResults: -1` |
+| `keywords=…` extra filters | `SearchOptions.Extra` map (`size`, `color`, `type_image`, `layout`, `license_image`, `resolution`, `duration`, `license_videos`) |
+| `DDGSException` / `TimeoutException` / `RatelimitException` | errors wrapping `ddgs.ErrDDGS` / `ddgs.ErrTimeout` / `ddgs.ErrRatelimit` (`errors.Is`) |
+| `DDGS_PROXY` env, `"tb"` proxy alias | same |
 
-Results are returned as `[]ddgs.Result` where `Result` is
-`map[string]any` with the same keys as the Python dicts
-(`title`, `href`, `body` for text; `date`, `title`, `body`, `url`, `image`,
-`source` for news; etc.).
+Every method takes a `context.Context` — cancellation and deadlines propagate
+to all in-flight engine requests. `DDGS` is safe for concurrent use; construct
+one and share it.
 
-## Engines
+## CLI
 
-| Function | Available backends |
-|---|---|
-| `Text` | `brave`, `duckduckgo`, `google`, `grokipedia`, `mojeek`, `startpage`, `wikipedia`, `yahoo` |
-| `Images` | `bing`, `duckduckgo` |
-| `News` | `bing`, `duckduckgo`, `yahoo` |
-| `Videos` | `duckduckgo` |
-| `Books` | `annasarchive` |
-
-`bing` and `yandex` (text) are disabled upstream (`disabled = True` in
-`ddgs/engines/bing.py` and, since commit f4ba66c / v9.15.0,
-`ddgs/engines/yandex.py`) and are therefore not registered here either; the
-`newYandex` factory code is kept for reference, mirroring the disabled Python
-class. `TestRegistryMatchesPython` pins this key set.
-
-Result semantics match the Python implementation: with `backend: "auto"`
-engines are shuffled, wikipedia/grokipedia are prioritized for text search,
-one request is issued per unique provider, results are deduplicated by URL,
-counted across engines, and ranked (wikipedia first, then title+body match,
-title-only, body-only, neither). Behavior is verified against Python ddgs
-v9.16.0 by golden-vector parity tests (`testdata/`, incl. the Google WML
-fixture `testdata/google_wml.html`).
-
-The scheduler improves on the Python thread-pool waves:
-
-- **Streaming fan-out** — results are consumed as each engine finishes; once
-  `MaxResults` is reached, in-flight requests are cancelled instead of
-  waiting on the slowest engine.
-- **General-engine floor** — at least one general SERP engine is in flight
-  from the start, alongside the single-result encyclopedia engines.
-- **Failure cooldown** — engines that fail repeatedly (e.g. IP-blocked) are
-  skipped in auto mode for 5 minutes. In-memory, per `DDGS` instance; reuse
-  one instance to benefit. Explicit `Backend` selection bypasses it.
-
-## Examples
-
-```go
-ctx := context.Background()
-
-// Specific backends, news from the last week
-news, err := d.News(ctx, "AI", &ddgs.SearchOptions{
-	Backend:    "duckduckgo,yahoo",
-	TimeLimit:  "w",
-	MaxResults: 20,
-})
-
-// Image search with filters (same kwargs as Python)
-imgs, err := d.Images(ctx, "sunset", &ddgs.SearchOptions{
-	Extra: map[string]string{"size": "Large", "color": "Monochrome"},
-})
-
-// Behind a proxy
-d, err := ddgs.New(&ddgs.Config{Proxy: "socks5://127.0.0.1:9150"})
-
-// Extract page content as Markdown
-page, err := d.Extract(ctx, "https://example.com", ddgs.FormatTextMarkdown)
-fmt.Println(page.Content)
+```sh
+ddgs text -q "golang context" -m 5
+ddgs images -q "cat" -size Large -o json          # save to json file
+ddgs images -q "cat" -d -dd ./cats -th 8          # download images
+ddgs news -q "ai" -t d -b duckduckgo,bing         # last day, two backends
+ddgs videos -q "gopher" -res high
+ddgs books -q "dune"
+ddgs extract -u https://go.dev/doc/effective_go -f text_markdown
+ddgs api --port 4479                              # HTTP server
+ddgs mcp                                          # MCP stdio server
+ddgs version
 ```
 
-## Differences from the Python version
+Flags mirror the Python CLI (`ddgs --help` there): `-q/-k/-r/-s/-t/-m/-p/-b`,
+`-o` output (`csv`, `json`, or `name.csv|name.json`), `-d/-dd/-th` downloads,
+`-pr` proxy (`tb` = Tor Browser socks5h alias), `-v` verify, `-nc` no color.
 
-- Methods take a `context.Context` and return `error` (Go idiom) instead of
-  raising exceptions.
-- `max_results=None` is expressed as `MaxResults: -1`.
-- HTTP requests use `net/http` with browser-like headers instead of primp's
-  TLS impersonation, so heavily-fingerprinting engines may rate-limit sooner.
-- `Extract`'s markdown conversion uses
-  [html-to-markdown](https://github.com/JohannesKaufmann/html-to-markdown)
-  (links, emphasis and tables preserved as standard CommonMark) rather than
-  primp's Rust converter; output is richer but not byte-identical.
-- `Extract` format `"text_rich"` (Python: `ddgs.extract(url, fmt="text_rich")`)
-  is produced by primp's Rust rich-text extractor and has no pure-Go
-  equivalent: `d.Extract(ctx, url, ddgs.FormatTextRich)` returns
-  `ddgs.ErrUnsupportedFormat` (wraps `ErrDDGS`, testable with `errors.Is`).
-- The auto-mode scheduler streams results and cancels early (see Engines);
-  the Python version waits on thread-pool waves.
-- The CLI / API server / MCP server of the Python package are out of scope;
-  this is the library only.
+## HTTP API server
 
-## Disclaimer
+```sh
+ddgs-api --host 0.0.0.0 --port 4479
+curl -s http://127.0.0.1:4479/search/text?query=golang&max_results=3
+curl -s -X POST http://127.0.0.1:4479/search/images \
+     -H 'Content-Type: application/json' \
+     -d '{"query":"cat","max_results":3,"size":"Large"}'
+```
 
-Same as upstream: this library is for educational purposes; you are
-responsible for complying with the terms of service of the search engines
-it talks to.
+Endpoints: `GET|POST /search/{text,images,news,videos,books}`, `GET|POST
+/extract`, `GET /`, `GET /health`. JSON field names, defaults and the
+`{"detail": …}` error shape match the Python FastAPI server, so clients of one
+work against the other.
+
+## MCP server
+
+```sh
+ddgs-mcp        # JSON-RPC 2.0 over stdio
+```
+
+Tools: `search_text`, `search_images`, `search_news`, `search_videos`,
+`search_books`, `extract_content` — same names/parameters as the Python MCP
+server. Client configuration:
+
+```json
+{
+  "mcpServers": {
+    "ddgs": {
+      "command": "ddgs-mcp"
+    }
+  }
+}
+```
+
+## How it works
+
+`DDGS.search` fans out to engines concurrently and **streams**: as soon as any
+engine returns, its results are deduplicated (by href/image/url/embed_url) and
+counted; once `MaxResults` is reached all in-flight requests are cancelled.
+Engines are queried in priority order (wikipedia 2.0, grokipedia 1.9, rest 1.0)
+with one request per unique provider; in auto mode an engine that fails twice
+in a row is put on a 5-minute cooldown. Results are finally ranked by a
+wikipedia-first, token-overlap bucketing ranker — the same
+`SimpleFilterRanker` as Python.
+
+## Differences from the Python implementation
+
+Deliberate, documented in [docs/SPEC.md](docs/SPEC.md) §9:
+
+- Streaming fan-out scheduler instead of wave-based thread pools; failure
+  cooldown per engine; `context.Context` everywhere.
+- **No TLS impersonation**: Python uses primp (browser TLS/JA3 fingerprints);
+  this port uses `net/http` with a browser UA pool. Fingerprint-sensitive
+  engines may rate-limit the Go client sooner.
+- `extract` format `text_rich` returns `ErrUnsupportedFormat` (primp-only).
+
+## Development
+
+```sh
+make build        # bin/ddgs, bin/ddgs-api, bin/ddgs-mcp
+make test         # unit tests (no network)
+make integration  # live-engine tests (-tags=integration)
+make lint         # gofmt check + go vet
+make release      # cross-compile 11 platforms into dist/
+```
+
+Parity is enforced by golden tests: engine payloads and extraction results are
+asserted against fixtures generated by the Python implementation
+(`testdata/parity_*.json`), and `TestRegistryMatchesPython` pins the backend
+registry to upstream's `ENGINES` dict.
+
+## Credits & License
+
+MIT. This repo is a fork of
+[dreamyang-liu/ddgs-go](https://github.com/dreamyang-liu/ddgs-go) (the original
+Go port), brought to parity with
+[deedy5/ddgs](https://github.com/deedy5/ddgs) v9.16.0 (MIT, Igor Babin) — the
+Python original whose engine logic is mirrored here file by file. See
+[LICENSE](LICENSE) and [CHANGELOG.md](CHANGELOG.md).
