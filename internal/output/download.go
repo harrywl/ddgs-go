@@ -36,17 +36,17 @@ const maxFilenameLen = 200
 // failures are reported to stderr and skipped, exactly as Python's
 // _download_file swallows exceptions into a debug log.
 func DownloadResults(query string, results []ddgs.Result, funcName, category, proxy, dir string, threads int, verify bool) (string, int, error) {
-	if len(results) == 0 {
-		return "", 0, nil
-	}
-
 	dirPath := dir
 	if dirPath == "" {
-		dirPath = fmt.Sprintf("%s_%s_%s", funcName, query,
-			time.Now().UTC().Format("20060102_150405"))
+		dirPath = autoDownloadDir(funcName, query)
 	}
+	// cli.py creates the directory before iterating, so `-d` with no results
+	// still leaves an empty directory behind.
 	if err := EnsureDir(dirPath); err != nil {
 		return "", 0, err
+	}
+	if len(results) == 0 {
+		return dirPath, 0, nil
 	}
 	if threads <= 0 {
 		threads = 10 // cli.py: threads = 10 if threads is None else threads
@@ -92,6 +92,7 @@ func DownloadResults(query string, results []ddgs.Result, funcName, category, pr
 	)
 	sem := make(chan struct{}, threads)
 	total := len(jobs)
+	showProgress := isTTY(os.Stderr)
 
 	for _, j := range jobs {
 		wg.Add(1)
@@ -100,7 +101,8 @@ func DownloadResults(query string, results []ddgs.Result, funcName, category, pr
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			name := fmt.Sprintf("%d_%s", j.index, j.filename)
+			// cli.py: Path(dir) / f"{i}_{filename}"[:200]
+			name := truncateFilename(fmt.Sprintf("%d_%s", j.index, j.filename))
 			if err := downloadFile(client, j.fileURL, dirPath, name); err != nil {
 				// cli.py logs at debug level and keeps going.
 				fmt.Fprintf(os.Stderr, "download_file url=%s: %v\n", j.fileURL, err)
@@ -109,33 +111,60 @@ func DownloadResults(query string, results []ddgs.Result, funcName, category, pr
 			done++
 			n := done
 			mu.Unlock()
-			printDownloadProgress(n, total)
+			if showProgress {
+				printDownloadProgress(n, total)
+			}
 		}(j)
 	}
 	wg.Wait()
-	fmt.Fprintln(os.Stderr) // finish the progress line
+	// click.progressbar hides itself when the stream is not a TTY
+	// (is_hidden = not isatty(file)), so piped output stays clean.
+	if isTTY(os.Stderr) {
+		fmt.Fprintln(os.Stderr) // finish the progress line
+	}
 
 	return dirPath, done, nil
 }
 
+// autoDownloadDir builds cli.py's default directory:
+// f"{function_name}_{query}_{datetime.now(tz=timezone.utc):%Y%m%d_%H%M%S}".
+func autoDownloadDir(funcName, query string) string {
+	return fmt.Sprintf("%s_%s_%s", funcName, query,
+		time.Now().UTC().Format("20060102_150405"))
+}
+
 // downloadFilename mirrors cli.py's
 // `unquote(url.split("/")[-1].split("?")[0])`.
+//
+// Note the order: Python takes the last "/"-separated segment first, then
+// strips the query at the first "?", then percent-decodes. A "/" inside the
+// query therefore wins over the path (e.g. "http://x/a?b=/c/d" -> "d"), and a
+// trailing slash yields an empty name (the caller prefixes "{i}_").
+//
+// urllib.parse.unquote leaves "+" alone, hence PathUnescape rather than
+// QueryUnescape. The one deliberate deviation is the ".." sanitising below:
+// Python joins the decoded name to the target directory unchecked, which
+// allows a remote-supplied "%2e%2e%2f" to escape it. The CLI neutralises that
+// traversal while otherwise keeping the same name.
 func downloadFilename(raw string) string {
 	name := raw
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
 	if i := strings.Index(name, "?"); i >= 0 {
 		name = name[:i]
 	}
-	name = path.Base(name)
-	if decoded, err := url.QueryUnescape(name); err == nil {
+	if decoded, err := url.PathUnescape(name); err == nil {
 		name = decoded
 	}
-	if name == "" || name == "." || name == "/" {
-		name = "download"
-	}
 	// Guard against path traversal in a remote-supplied name.
-	name = strings.ReplaceAll(name, "..", "_")
+	return strings.ReplaceAll(name, "..", "_")
+}
+
+// truncateFilename mirrors cli.py's `filename[:200]`.
+func truncateFilename(name string) string {
 	if r := []rune(name); len(r) > maxFilenameLen {
-		name = string(r[:maxFilenameLen])
+		return string(r[:maxFilenameLen])
 	}
 	return name
 }

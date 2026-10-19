@@ -27,74 +27,77 @@ var wideFields = map[string]bool{
 }
 
 // PrintData writes results to stdout exactly like cli.py::_print_data:
-// a numbered separator per result, then one styled line per non-empty field,
-// pausing for Enter between results when stdout is a TTY.
+// a numbered separator per result, then one line per result field, pausing for
+// Enter between results when stdout is a terminal.
 //
-// Colors are disabled automatically when stdout is not a terminal (Python:
-// `if not is_tty: no_color = True`) or when noColor is requested.
+// Colours are disabled automatically when stdout is not a terminal (Python:
+// `if not is_tty: no_color = True`); in that case click also strips the ANSI
+// escapes entirely, so this implementation writes plain text off a TTY.
 func PrintData(results []ddgs.Result, category string, noColor bool) {
 	PrintDataTo(os.Stdout, os.Stdin, results, category, noColor)
 }
 
 // PrintDataTo is PrintData with injectable streams (used by tests).
 func PrintDataTo(w io.Writer, in io.Reader, results []ddgs.Result, category string, noColor bool) {
-	_, isTTY := w.(*os.File)
-	if !isTTY {
+	tty := isTTYWriter(w)
+	if !tty {
 		noColor = true
 	}
 	if len(results) == 0 {
 		return
 	}
 
-	fields := ddgs.ResultFields(category)
-	if len(fields) == 0 {
-		fields = unionKeys(results)
-	}
+	fields := fieldOrder(category, results)
 
+	var reader *bufio.Reader
+	if tty && in != nil {
+		reader = bufio.NewReader(in)
+	}
+	// Python calls input() after every result in interactive mode.
 	pause := func() {
-		if !isTTY || in == nil {
+		if reader == nil {
 			return
 		}
-		// Python blocks on input() between results in interactive mode.
-		bufio.NewReader(in).ReadString('\n')
+		_, _ = reader.ReadString('\n')
 	}
 
 	for i, r := range results {
-		var sep string
-		if isTTY {
+		sep := fmt.Sprintf("%d.", i+1)
+		if tty {
 			sep = fmt.Sprintf("%d.\t    %s", i+1, strings.Repeat("=", 78))
-		} else {
-			sep = fmt.Sprintf("%d.", i+1)
+			sep = style(sep, itoa(fgWhite), itoa(bgBlack), false)
 		}
-		// click.secho(sep, bg="black", fg="white")
-		fmt.Fprintln(w, style(sep, itoa(fgWhite), itoa(bgBlack), false))
+		fmt.Fprintln(w, sep)
 
-		j := 0 // 1-based field index for the color table, counting only printed fields
-		for _, k := range fields {
-			v := r[k]
-			if isEmptyValue(v) {
+		// Python's enumerate(e.items(), start=1) counts every field, empty or
+		// not, so the colour index must do the same.
+		for j, k := range fields {
+			v, ok := r[k]
+			if !ok {
+				// e.items() only yields keys present in the dict.
 				continue
 			}
-			j++
-
 			title := k
 			if k == "detected_language" {
 				title = "language"
 			}
-			text := formatFieldValue(v)
-			if text != "" {
+			text := pyString(v)
+			if isTruthy(v) {
 				width := 78
 				if wideFields[k] {
 					width = 300
 				}
 				text = wrapText(text, width, 12)
 			}
-
-			fg := itoa(fgWhite)
-			if !noColor {
-				fg = colorByIndex(j, false)
+			line := padRight(title, 12) + text
+			if tty {
+				fg := itoa(fgWhite)
+				if !noColor {
+					fg = colorByIndex(j+1, false)
+				}
+				line = style(line, fg, itoa(bgBlack), true)
 			}
-			fmt.Fprintln(w, style(padRight(title, 12)+text, fg, itoa(bgBlack), true))
+			fmt.Fprintln(w, line)
 		}
 		pause()
 	}
@@ -103,111 +106,153 @@ func PrintDataTo(w io.Writer, in io.Reader, results []ddgs.Result, category stri
 // bgBlack is the ANSI background code for black (click bg="black" → 40).
 const bgBlack = 40
 
-// isEmptyValue mirrors Python's `if v:` on a result field value.
-func isEmptyValue(v any) bool {
-	switch t := v.(type) {
-	case nil:
-		return true
-	case string:
-		return t == ""
-	case []byte:
-		return len(t) == 0
-	case map[string]any:
-		return len(t) == 0
-	default:
-		return false
-	}
-}
-
-// formatFieldValue renders a field value as text, mirroring Python's f"{v}".
-func formatFieldValue(v any) string {
-	switch t := v.(type) {
-	case nil:
-		return ""
-	case string:
-		return t
-	case []byte:
-		return string(t)
-	default:
-		return fmt.Sprintf("%v", t)
-	}
+// isTTYWriter reports whether w is an interactive terminal. A *os.File that
+// is redirected to a regular file is not (Python's sys.stdout.isatty()).
+func isTTYWriter(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && isTTY(f)
 }
 
 // wrapText mirrors click.wrap_text(text, width, initial_indent="",
-// subsequent_indent=" "*12, preserve_paragraphs=True) closely enough for
-// terminal display: words are flowed to `width` columns and every line after
-// the first is indented by `subsequentIndent` spaces.
+// subsequent_indent=" "*12, preserve_paragraphs=True):
+//   - tabs are expanded, paragraphs are separated by empty lines and joined
+//     with exactly one blank line,
+//   - each paragraph is greedy-wrapped to `width` visible characters,
+//   - every line after the first is prefixed with the subsequent indent.
 func wrapText(text string, width, subsequentIndent int) string {
-	indent := strings.Repeat(" ", subsequentIndent)
 	if width <= 0 {
 		width = 78
 	}
+	text = expandTabs(text)
+	indent := strings.Repeat(" ", subsequentIndent)
 
-	// preserve_paragraphs: blank lines separate paragraphs and are kept.
-	var out []string
-	for _, para := range splitParagraphs(text) {
+	paras := splitParagraphs(text)
+	if len(paras) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(paras))
+	for _, para := range paras {
 		out = append(out, wrapParagraph(para, width, indent))
 	}
-	return strings.Join(out, "\n")
+	return strings.Join(out, "\n\n")
 }
 
-// splitParagraphs splits on runs of blank lines, keeping the paragraph
-// structure (click's preserve_paragraphs=True).
+// expandTabs mirrors str.expandtabs() with the default tab size of 8.
+func expandTabs(s string) string {
+	if !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		switch r {
+		case '\n', '\r':
+			b.WriteRune(r)
+			col = 0
+		case '\t':
+			n := 8 - col%8
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+		default:
+			b.WriteRune(r)
+			col++
+		}
+	}
+	return b.String()
+}
+
+// splitParagraphs splits text into paragraphs the way click's
+// preserve_paragraphs branch does: empty lines delimit paragraphs (runs of
+// empty lines collapse), leading/trailing empty lines are dropped, and the
+// lines of a paragraph are joined with a single space.
 func splitParagraphs(text string) []string {
-	paras := []string{}
-	cur := []string{}
-	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "" {
-			if len(cur) > 0 {
-				paras = append(paras, strings.Join(cur, " "))
-				cur = cur[:0]
-			}
-			paras = append(paras, "")
+	var paras []string
+	var buf []string
+	flush := func() {
+		if len(buf) > 0 {
+			paras = append(paras, strings.Join(buf, " "))
+			buf = nil
+		}
+	}
+	for _, line := range splitLines(text) {
+		if line == "" {
+			flush()
 			continue
 		}
-		cur = append(cur, strings.TrimSpace(line))
+		if len(buf) == 0 {
+			// click preserves the indent of a paragraph's first line as
+			// extra_indent; result fields never rely on it, so trim it.
+			line = strings.TrimLeft(line, " \t")
+		}
+		buf = append(buf, line)
 	}
-	if len(cur) > 0 {
-		paras = append(paras, strings.Join(cur, " "))
-	}
+	flush()
 	return paras
 }
 
+// splitLines mirrors str.splitlines for the newline forms that can occur in
+// HTTP-sourced text.
+func splitLines(s string) []string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.Split(s, "\n")
+}
+
 // wrapParagraph flows one paragraph to width columns with the continuation
-// indent applied from the second line on. click.wrap_text counts the indent
-// toward the width, so continuation lines hold width-len(indent) characters.
+// indent applied from the second line on. textwrap counts the indent toward
+// the width, so continuation lines hold width-len(indent) characters, and
+// overlong words are broken (break_long_words=True).
 func wrapParagraph(para string, width int, indent string) string {
-	if para == "" {
-		return ""
-	}
 	words := strings.Fields(para)
 	if len(words) == 0 {
 		return ""
 	}
 	contWidth := width - utf8.RuneCountInString(indent)
-	if contWidth < 10 {
-		contWidth = 10
+	if contWidth < 1 {
+		contWidth = 1
 	}
 
 	var lines []string
 	cur := ""
-	limit := width // first line gets the full width
+	limit := width
+	flush := func() {
+		if cur != "" {
+			lines = append(lines, cur)
+			cur = ""
+			limit = contWidth
+		}
+	}
+
 	for _, word := range words {
+		// Break words longer than the available line width, filling the
+		// current line first, like textwrap._handle_long_word.
+		for utf8.RuneCountInString(word) > limit {
+			runes := []rune(word)
+			space := limit - utf8.RuneCountInString(cur)
+			if cur != "" {
+				space-- // the separating space
+			}
+			if space <= 0 {
+				flush()
+				continue
+			}
+			cur += string(runes[:space])
+			word = string(runes[space:])
+			flush()
+		}
+
 		candidate := word
 		if cur != "" {
 			candidate = cur + " " + word
 		}
 		if utf8.RuneCountInString(candidate) > limit && cur != "" {
-			lines = append(lines, cur)
+			flush()
 			cur = word
-			limit = contWidth
 			continue
 		}
 		cur = candidate
 	}
-	if cur != "" {
-		lines = append(lines, cur)
-	}
+	flush()
 
 	var sb strings.Builder
 	for i, l := range lines {

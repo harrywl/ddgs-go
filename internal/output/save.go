@@ -5,7 +5,6 @@ package output
 
 import (
 	"bytes"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +16,13 @@ import (
 	ddgs "github.com/harrywl/ddgs-go"
 )
 
+// extraFieldOrder holds the Python dict key order for categories that are not
+// library result types. extract.py returns {"url": ..., "content": ...} and
+// cli.py saves that dict verbatim, so data[0].keys() is url, content.
+var extraFieldOrder = map[string][]string{
+	"extract": {"url", "content"},
+}
+
 // SaveData writes results to a CSV or JSON file, mirroring cli.py::_save_data.
 //
 // The Python logic is reproduced exactly:
@@ -26,8 +32,10 @@ import (
 //	filename = filename or f"{function_name}_{query}_{utc:%Y%m%d_%H%M%S}"
 //
 // So `-o json` uses ext="json" with an auto-generated basename, while
-// `-o out.json` writes to out.json. Any other extension is ignored (Python
-// writes nothing in that case).
+// `-o out.json` writes to out.json. Any other extension is ignored: Python's
+// _save_data has no else branch, so `-o out.txt` silently writes nothing and
+// the command still succeeds. That quirk is preserved here (returned path is
+// empty).
 //
 // category is the ddgs result category ("text", "images", ...); it supplies
 // the CSV header / JSON key order, which in Python comes from
@@ -35,8 +43,7 @@ import (
 func SaveData(query string, results []ddgs.Result, functionName, category, filename string) (string, error) {
 	base, ext := splitOutputFilename(filename)
 	if base == "" {
-		base = fmt.Sprintf("%s_%s_%s", functionName, query,
-			time.Now().UTC().Format("20060102_150405"))
+		base = autoBaseName(functionName, query)
 	}
 	full := base + "." + ext
 
@@ -50,11 +57,16 @@ func SaveData(query string, results []ddgs.Result, functionName, category, filen
 			return "", err
 		}
 	default:
-		// Python's _save_data has no else branch: an unrecognised extension
-		// silently writes nothing. Report it instead of pretending success.
-		return "", fmt.Errorf("unsupported output format %q (use csv, json, name.csv or name.json)", ext)
+		return "", nil
 	}
 	return full, nil
+}
+
+// autoBaseName builds cli.py's default file stem:
+// f"{function_name}_{query}_{datetime.now(tz=timezone.utc):%Y%m%d_%H%M%S}".
+func autoBaseName(functionName, query string) string {
+	return fmt.Sprintf("%s_%s_%s", functionName, query,
+		time.Now().UTC().Format("20060102_150405"))
 }
 
 // splitOutputFilename mirrors the rsplit/endswith logic of _save_data.
@@ -73,24 +85,13 @@ func splitOutputFilename(filename string) (base, ext string) {
 }
 
 // SaveJSON writes results as an indented JSON array, mirroring _save_json
-// (json.dumps(data, ensure_ascii=False, indent=2)).
+// (`json.dumps(data, ensure_ascii=False, indent=2)`): no trailing newline,
+// keys in Python dataclass order, non-ASCII left unescaped.
 //
 // Field order is the Python dataclass order (ddgs.ResultFields), which a plain
 // json.Marshal of a Go map cannot produce — encoding/json sorts map keys
 // alphabetically. The array is therefore assembled with an ordered encoder.
 func SaveJSON(path string, results []ddgs.Result, category string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	enc.SetEscapeHTML(false) // ensure_ascii=False equivalent for HTML chars
-	enc.SetIndent("", "  ")  // indent=2
-
-	// Wrap the pre-serialised objects so the outer array gets indenting while
-	// each element keeps its field order.
 	items := make([]json.RawMessage, 0, len(results))
 	for _, r := range results {
 		raw, err := marshalOrdered(r, category)
@@ -99,20 +100,24 @@ func SaveJSON(path string, results []ddgs.Result, category string) error {
 		}
 		items = append(items, raw)
 	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // ensure_ascii=False equivalent for HTML chars
+	enc.SetIndent("", "  ")  // indent=2
 	if err := enc.Encode(items); err != nil {
 		return err
 	}
-	return f.Sync()
+	// Python's json.dumps does not append a newline; Encoder.Encode does.
+	out := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	return os.WriteFile(path, out, 0o644)
 }
 
 // marshalOrdered serialises one Result as a JSON object with keys in the
 // Python dataclass field order, falling back to first-seen map order for any
 // keys outside the known field list.
 func marshalOrdered(r ddgs.Result, category string) (json.RawMessage, error) {
-	keys := ddgs.ResultFields(category)
-	if len(keys) == 0 {
-		keys = unionKeys([]ddgs.Result{r})
-	}
+	keys := fieldOrder(category, []ddgs.Result{r})
 	seen := make(map[string]bool, len(keys))
 	for _, k := range keys {
 		seen[k] = true
@@ -141,13 +146,13 @@ func marshalOrdered(r ddgs.Result, category string) (json.RawMessage, error) {
 			buf.WriteByte(',')
 		}
 		first = false
-		kb, err := json.Marshal(k)
+		kb, err := marshalNoEscape(k)
 		if err != nil {
 			return nil, err
 		}
 		buf.Write(kb)
 		buf.WriteByte(':')
-		vb, err := json.Marshal(v)
+		vb, err := marshalNoEscape(v)
 		if err != nil {
 			return nil, err
 		}
@@ -157,73 +162,97 @@ func marshalOrdered(r ddgs.Result, category string) (json.RawMessage, error) {
 	return json.RawMessage(buf.Bytes()), nil
 }
 
-// SaveCSV writes results with a header row, mirroring _save_csv
-// (csv.DictWriter with fieldnames=data[0].keys(), QUOTE_MINIMAL — the
-// encoding/csv default).
-func SaveCSV(path string, results []ddgs.Result, category string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
+// marshalNoEscape encodes one JSON value with ensure_ascii=False semantics:
+// encoding/json's default HTML escaping (\u003c, \u003e, \u0026) is disabled,
+// matching Python's json.dumps(..., ensure_ascii=False).
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
 	}
-	defer f.Close()
-
-	w := csv.NewWriter(f)
-	fields := ddgs.ResultFields(category)
-	if len(fields) == 0 {
-		fields = unionKeys(results)
-	}
-	if err := w.Write(fields); err != nil {
-		return err
-	}
-	for _, r := range results {
-		row := make([]string, len(fields))
-		for i, k := range fields {
-			row[i] = csvValue(r[k])
-		}
-		if err := w.Write(row); err != nil {
-			return err
-		}
-	}
-	w.Flush()
-	if err := w.Error(); err != nil {
-		return err
-	}
-	return f.Sync()
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// unionKeys collects the keys of all results in first-seen order, used when
-// the category is unknown.
+// SaveCSV writes results with a header row, mirroring _save_csv: Python opens
+// the file with newline="" and uses csv.DictWriter's default excel dialect —
+// delimiter ",", quotechar '"', QUOTE_MINIMAL and lineterminator "\r\n".
+// encoding/csv cannot reproduce that byte-for-byte (it converts newlines
+// inside quoted fields to CRLF and quotes leading spaces), so the rows are
+// written directly.
+//
+// Like Python, an empty result set produces an empty file (the `if data:`
+// guard around writeheader).
+func SaveCSV(path string, results []ddgs.Result, category string) error {
+	var buf bytes.Buffer
+	if len(results) > 0 {
+		fields := fieldOrder(category, results)
+		writeCSVRow(&buf, fields)
+		for _, r := range results {
+			row := make([]string, len(fields))
+			for i, k := range fields {
+				if v, ok := r[k]; ok {
+					row[i] = pyString(v)
+				}
+				// Missing key: csv.DictWriter's restval ("").
+			}
+			writeCSVRow(&buf, row)
+		}
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+// writeCSVRow writes one CRLF-terminated record with minimal quoting.
+func writeCSVRow(buf *bytes.Buffer, row []string) {
+	for i, field := range row {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(csvQuote(field))
+	}
+	buf.WriteString("\r\n")
+}
+
+// csvQuote implements Python's QUOTE_MINIMAL: quote only when the field holds
+// the delimiter, the quotechar, '\r' or '\n'; double embedded quotes.
+func csvQuote(s string) string {
+	if !strings.ContainsAny(s, ",\"\r\n") {
+		return s
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// fieldOrder returns the ordered field names used for JSON objects, CSV
+// headers and printed columns. It mirrors cli.py's data[0].keys(): the Python
+// dataclass field order when the category is known, a fixed order for
+// extract, and a deterministic (sorted) fallback otherwise.
+func fieldOrder(category string, results []ddgs.Result) []string {
+	if f := ddgs.ResultFields(category); len(f) > 0 {
+		return f
+	}
+	if f, ok := extraFieldOrder[category]; ok {
+		return f
+	}
+	return unionKeys(results)
+}
+
+// unionKeys collects the keys of all results in sorted order, used when the
+// category is unknown (Go maps are unordered, so first-seen order is not
+// retrievable).
 func unionKeys(results []ddgs.Result) []string {
 	seen := map[string]bool{}
-	var keys []string
 	for _, r := range results {
 		for k := range r {
-			if !seen[k] {
-				seen[k] = true
-				keys = append(keys, k)
-			}
+			seen[k] = true
 		}
 	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	return keys
-}
-
-// csvValue renders one cell. Python's csv writer stringifies values; nested
-// dicts (videos' images/statistics) become their JSON form, matching what
-// str() would show closely enough for a data file.
-func csvValue(v any) string {
-	switch t := v.(type) {
-	case nil:
-		return ""
-	case string:
-		return t
-	case []byte:
-		return string(t)
-	default:
-		if b, err := json.Marshal(t); err == nil {
-			return string(b)
-		}
-		return fmt.Sprintf("%v", t)
-	}
 }
 
 // EnsureDir creates a directory (and parents), mirroring
