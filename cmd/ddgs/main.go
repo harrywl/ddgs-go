@@ -36,29 +36,65 @@ Commands:
   mcp        Start the MCP server over stdio.
   api        Start/stop the HTTP API server.
 
-Run 'ddgs <command> -h' for the options of a command.
+Run 'ddgs <command> --help' for the options of a command.
 
 Examples:
   ddgs text -q "golang context" -m 5
   ddgs images -q cat -size Large -o json
-  ddgs news -q ai -t d -b duckduckgo,bing
+  ddgs news -q ai -t d -b duckduckgo -b bing
   ddgs extract -u https://go.dev/doc/effective_go -f text_markdown
   ddgs api --port 4479
 `
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		// `-h`/`--help` on a subcommand makes the flag package return
+		// flag.ErrHelp after printing usage; click exits 0 in that case.
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		fmt.Fprintf(os.Stderr, "%s\n", err)
+		var ue *usageError
+		if errors.As(err, &ue) {
+			os.Exit(2) // click's UsageError exit status
+		}
 		os.Exit(1)
 	}
+}
+
+// usageError marks click UsageError-equivalent failures (bad option, bad
+// choice, missing required option, unknown command). click exits with status
+// 2 for those, and 0/1 for command results.
+type usageError struct{ err error }
+
+func (e *usageError) Error() string { return e.err.Error() }
+func (e *usageError) Unwrap() error { return e.err }
+
+// usagef builds a usageError.
+func usagef(format string, args ...any) error {
+	return &usageError{err: fmt.Errorf(format, args...)}
+}
+
+// asUsageError tags err as a usage error unless it is flag.ErrHelp (which the
+// caller turns into a successful exit).
+func asUsageError(err error) error {
+	if err == nil || errors.Is(err, flag.ErrHelp) {
+		return err
+	}
+	var ue *usageError
+	if errors.As(err, &ue) {
+		return err
+	}
+	return &usageError{err: err}
 }
 
 // run dispatches one subcommand, mirroring click's group behaviour. An unknown
 // or missing command prints the usage text and fails, like click does.
 func run(args []string) error {
 	if len(args) == 0 {
+		// click's Group prints its help and exits 2 when no command is given.
 		fmt.Fprint(os.Stderr, usageText)
-		return errors.New("no command given")
+		return usagef("no command given")
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
@@ -86,7 +122,7 @@ func run(args []string) error {
 		return nil
 	default:
 		fmt.Fprint(os.Stderr, usageText)
-		return fmt.Errorf("no such command %q", cmd)
+		return usagef("no such command %q", cmd)
 	}
 }
 
@@ -101,12 +137,10 @@ type backendList []string
 func (b *backendList) String() string { return strings.Join(*b, ",") }
 
 func (b *backendList) Set(v string) error {
-	// Accept both `-b a -b b` and a single `-b a,b` spelling.
-	for _, part := range strings.Split(v, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			*b = append(*b, part)
-		}
-	}
+	// click's multiple=True Choices validate each occurrence on its own, so
+	// `-b bing,duckduckgo` is an invalid choice in cli.py — only repeated
+	// -b flags are accepted. Keep that behaviour.
+	*b = append(*b, v)
 	return nil
 }
 
@@ -149,23 +183,78 @@ type searchFlags struct {
 // spelling (Go's flag package treats -x and --x identically, so registering
 // "q" and "query" covers -q/--q/-query/--query).
 func stringFlag(fs *flag.FlagSet, p *string, short, long, value, usage string) {
-	fs.StringVar(p, short, value, usage)
+	if short != "" {
+		fs.StringVar(p, short, value, usage)
+	}
 	if long != "" && long != short {
 		fs.StringVar(p, long, value, usage)
 	}
 }
 
 func boolFlag(fs *flag.FlagSet, p *bool, short, long string, value bool, usage string) {
-	fs.BoolVar(p, short, value, usage)
+	if short != "" {
+		fs.BoolVar(p, short, value, usage)
+	}
 	if long != "" && long != short {
 		fs.BoolVar(p, long, value, usage)
 	}
 }
 
 func intFlag(fs *flag.FlagSet, p *int, short, long string, value int, usage string) {
-	fs.IntVar(p, short, value, usage)
+	if short != "" {
+		fs.IntVar(p, short, value, usage)
+	}
 	if long != "" && long != short {
 		fs.IntVar(p, long, value, usage)
+	}
+}
+
+// boolishValue mirrors click's BOOL option type, which cli.py gets implicitly
+// for `-v/--verify` (default=True, no is_flag): the option takes a value and
+// accepts true/false, 1/0, yes/no, on/off, t/f, y/n (case-insensitive).
+// It deliberately does not implement flag.Getter/IsBoolFlag, so a bare `-v`
+// errors exactly like click's "Option '-v' requires an argument".
+type boolishValue struct{ p *bool }
+
+func (b boolishValue) String() string {
+	if b.p == nil {
+		return "false"
+	}
+	if *b.p {
+		return "true"
+	}
+	return "false"
+}
+
+func (b boolishValue) Set(s string) error {
+	v, ok := parseBoolish(s)
+	if !ok {
+		return fmt.Errorf("invalid boolean value %q", s)
+	}
+	*b.p = v
+	return nil
+}
+
+// parseBoolish maps click.BOOL's accepted spellings to a bool.
+func parseBoolish(s string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true, true
+	case "0", "false", "f", "no", "n", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// boolishFlag registers a click-BOOL-style option (takes a value).
+func boolishFlag(fs *flag.FlagSet, p *bool, short, long string, value bool, usage string) {
+	*p = value
+	if short != "" {
+		fs.Var(boolishValue{p: p}, short, usage)
+	}
+	if long != "" && long != short {
+		fs.Var(boolishValue{p: p}, long, usage)
 	}
 }
 
@@ -217,10 +306,29 @@ func checkChoice(name, value string, allowed []string) error {
 // Search commands
 // ---------------------------------------------------------------------------
 
-// runSearch implements text/images/videos/news/books. The per-command flag
-// sets and post-search actions follow cli.py exactly.
-func runSearch(category string, args []string) error {
-	var f searchFlags
+// parseSearchFlags registers exactly the options cli.py declares for one
+// search command and parses args, applying click.Choice validation. It is
+// split out of runSearch so the per-command flag tree can be tested without
+// touching the network.
+func parseSearchFlags(category string, args []string) (*searchFlags, error) {
+	fs, f := newSearchFlagSet(category)
+	if err := fs.Parse(args); err != nil {
+		return nil, asUsageError(err)
+	}
+	if fs.NArg() > 0 {
+		return nil, usagef("unexpected argument %q", fs.Arg(0))
+	}
+	if err := validateSearchFlags(category, f); err != nil {
+		return nil, asUsageError(err)
+	}
+	return f, nil
+}
+
+// newSearchFlagSet builds the FlagSet and flag struct for a search command.
+// Splitting it from parsing lets tests enumerate the registered options and
+// compare them with cli.py's @click.option list.
+func newSearchFlagSet(category string) (*flag.FlagSet, *searchFlags) {
+	f := &searchFlags{}
 	fs := flag.NewFlagSet(category, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
@@ -233,7 +341,9 @@ func runSearch(category string, args []string) error {
 	fs.Var(&f.backends, "backend", "search backend (repeatable): "+strings.Join(backendChoices[category], ", "))
 	stringFlag(fs, &f.output, "o", "output", "", "csv, json or filename.csv|json (save the results to a file)")
 	stringFlag(fs, &f.proxy, "pr", "proxy", "", "the proxy to send requests, example: socks5h://127.0.0.1:9150")
-	boolFlag(fs, &f.verify, "v", "verify", true, "verify SSL when making the request")
+	// cli.py: @click.option("-v", "--verify", default=True) — a BOOL-valued
+	// option, not a flag, so it takes a value ("-v false").
+	boolishFlag(fs, &f.verify, "v", "verify", true, "verify SSL when making the request")
 	boolFlag(fs, &f.noColor, "nc", "no-color", false, "disable color output")
 
 	// books has no region/safesearch/timelimit in cli.py.
@@ -275,29 +385,24 @@ func runSearch(category string, args []string) error {
 		fmt.Fprintf(os.Stderr, "Usage: ddgs %s [options]\n\nOptions:\n", category)
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
+	return fs, f
+}
+
+// runSearch implements text/images/videos/news/books. The per-command flag
+// sets and post-search actions follow cli.py exactly.
+func runSearch(category string, args []string) error {
+	f, err := parseSearchFlags(category, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
-	}
 
-	if err := validateSearchFlags(category, &f); err != nil {
-		return err
-	}
-
-	// cli.py: query = keywords or query; the library raises "query is
-	// mandatory" when both are empty.
-	query := f.query
-	if f.keywords != "" {
-		query = f.keywords
-	}
+	query := effectiveQuery(f)
 
 	d, err := ddgs.New(&ddgs.Config{Proxy: f.proxy, Verify: verifyOf(f.verify)})
 	if err != nil {
 		return err
 	}
-	opts := searchOptionsOf(category, &f)
+	opts := searchOptionsOf(category, f)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -313,24 +418,42 @@ func runSearch(category string, args []string) error {
 		fileQuery = output.SanitizeQuery(query)
 	}
 
-	switch {
-	case f.output != "":
-		path, err := output.SaveData(fileQuery, results, category, category, f.output)
-		if err != nil {
-			return err
+	// cli.py::text/images use two independent `if` blocks (save AND download
+	// may both run); videos/news/books have no download branch at all.
+	if category == "text" || category == "images" {
+		if f.output != "" {
+			if _, err := output.SaveData(fileQuery, results, category, category, f.output); err != nil {
+				return err
+			}
 		}
-		fmt.Fprintf(os.Stderr, "Results saved to %s\n", path)
-	case f.download:
-		dir, n, err := output.DownloadResults(fileQuery, results, category, category,
-			f.proxy, f.downloadDir, f.threads, f.verify)
-		if err != nil {
-			return err
+		if f.download {
+			if _, _, err := output.DownloadResults(fileQuery, results, category, category,
+				f.proxy, f.downloadDir, f.threads, f.verify); err != nil {
+				return err
+			}
 		}
-		fmt.Fprintf(os.Stderr, "Downloaded %d file(s) to %s\n", n, dir)
-	default:
-		output.PrintData(results, category, f.noColor)
+		if f.output == "" && !f.download {
+			output.PrintData(results, category, f.noColor)
+		}
+		return nil
 	}
+
+	if f.output != "" {
+		_, err := output.SaveData(fileQuery, results, category, category, f.output)
+		return err
+	}
+	output.PrintData(results, category, f.noColor)
 	return nil
+}
+
+// effectiveQuery mirrors cli.py's `query = keywords or query`: the deprecated
+// -k/--keywords alias wins when given. The library then rejects an empty
+// result with "query is mandatory", exactly like Python.
+func effectiveQuery(f *searchFlags) string {
+	if f.keywords != "" {
+		return f.keywords
+	}
+	return f.query
 }
 
 // dispatchSearch calls the library method for a category.
@@ -361,8 +484,10 @@ func searchOptionsOf(category string, f *searchFlags) *ddgs.SearchOptions {
 		backend = f.backends.String()
 	}
 	maxResults := f.maxResults
-	if maxResults < 0 {
-		maxResults = -1 // Python max_results=None → unlimited (SPEC §9.5)
+	if maxResults <= 0 {
+		// cli.py passes the int straight through and the library treats a
+		// falsy max_results as "everything"; SPEC §9.5 spells that -1.
+		maxResults = -1
 	}
 	opts := &ddgs.SearchOptions{
 		MaxResults: maxResults,
@@ -403,6 +528,11 @@ func setIfGiven(m map[string]string, key, value string) {
 // validateSearchFlags reproduces the click.Choice validations of cli.py.
 func validateSearchFlags(category string, f *searchFlags) error {
 	for _, b := range f.backends {
+		// click validates each occurrence of a multiple=True Choice, so an
+		// explicitly empty -b is a usage error, not "option not given".
+		if b == "" {
+			return fmt.Errorf("invalid value for -b/--backend: %q", b)
+		}
 		if err := checkChoice("-b/--backend", b, backendChoices[category]); err != nil {
 			return err
 		}

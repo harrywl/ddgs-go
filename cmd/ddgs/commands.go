@@ -50,20 +50,22 @@ func runExtract(args []string) error {
 	stringFlag(fs, &format, "f", "format", "text_markdown", "output format ("+joinChoices(extractFmtChoices)+")")
 	stringFlag(fs, &out, "o", "output", "", "json or filename.json (save the results to a file)")
 	stringFlag(fs, &proxy, "pr", "proxy", "", "the proxy to send requests, example: socks5h://127.0.0.1:9150")
-	boolFlag(fs, &verify, "v", "verify", true, "verify SSL when making the request")
+	// cli.py's extract also uses @click.option("-v", "--verify", default=True),
+	// i.e. a BOOL-valued option that takes an argument.
+	boolishFlag(fs, &verify, "v", "verify", true, "verify SSL when making the request")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: ddgs extract -u URL [options]\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return err
+		return asUsageError(err)
 	}
 	if url == "" {
 		// click would fail with "Missing option '-u' / '--url'".
-		return errors.New("missing required option -u/--url")
+		return usagef("missing required option -u/--url")
 	}
 	if err := checkChoice("-f/--format", format, extractFmtChoices); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	d, err := ddgs.New(&ddgs.Config{Proxy: proxy, Verify: verifyOf(verify)})
@@ -93,16 +95,12 @@ func runExtract(args []string) error {
 
 	// cli.py builds [{k: v.decode() if bytes else v}] and saves it under the
 	// "extract" function name; the sanitize step uses the URL as the query.
-	// The "extract" category has no ResultFields entry, so the writers fall
-	// back to first-seen key order — url then content, matching Python's dict
-	// insertion order.
+	// The row order is url then content, matching Python's dict insertion
+	// order (see output.extraFieldOrder).
 	row := ddgs.Result{"url": extracted.URL, "content": content}
-	path, err := output.SaveData(output.SanitizeQuery(url), []ddgs.Result{row}, "extract", "extract", out)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Result saved to %s\n", path)
-	return nil
+	// _save_data is silent on success; it returns nothing and prints nothing.
+	_, err = output.SaveData(output.SanitizeQuery(url), []ddgs.Result{row}, "extract", "extract", out)
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +119,7 @@ func runMCP(args []string) error {
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// cli.py sets os.environ["DDGS_PROXY"] before starting the server; the
@@ -151,43 +149,64 @@ func apiPIDFile() (string, error) {
 	return home + "/.cache/ddgs/api.pid", nil
 }
 
-// runAPI mirrors cli.py's `api` command: foreground serve, -d detach, -s stop.
-func runAPI(args []string) error {
-	var (
-		detach bool
-		stop   bool
-		host   string
-		port   int
-		reload bool
-		proxy  string
-	)
+// apiFlags holds the options of cli.py's `api` command.
+type apiFlags struct {
+	detach bool
+	stop   bool
+	host   string
+	port   int
+	reload bool
+	proxy  string
+}
+
+// newAPIFlagSet registers the api option tree on a fresh FlagSet.
+func newAPIFlagSet(f *apiFlags) *flag.FlagSet {
 	fs := flag.NewFlagSet("api", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	boolFlag(fs, &detach, "d", "detach", false, "run the server in detached mode (background)")
-	boolFlag(fs, &stop, "s", "stop", false, "stop the detached server")
-	stringFlag(fs, &host, "", "host", "0.0.0.0", "host to bind the server to")
-	intFlag(fs, &port, "", "port", 4479, "port to bind the server to")
-	boolFlag(fs, &reload, "", "reload", false, "enable auto-reload on code changes")
-	stringFlag(fs, &proxy, "pr", "proxy", "", "the proxy to send requests, example: socks5h://127.0.0.1:9150")
+	boolFlag(fs, &f.detach, "d", "detach", false, "run the server in detached mode (background)")
+	boolFlag(fs, &f.stop, "s", "stop", false, "stop the detached server")
+	stringFlag(fs, &f.host, "", "host", "0.0.0.0", "host to bind the server to")
+	intFlag(fs, &f.port, "", "port", 4479, "port to bind the server to")
+	boolFlag(fs, &f.reload, "", "reload", false, "enable auto-reload on code changes")
+	stringFlag(fs, &f.proxy, "pr", "proxy", "", "the proxy to send requests, example: socks5h://127.0.0.1:9150")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: ddgs api [options]\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
+	return fs
+}
+
+// parseAPIFlags parses the api command's args.
+func parseAPIFlags(args []string) (*apiFlags, error) {
+	f := &apiFlags{}
+	fs := newAPIFlagSet(f)
 	if err := fs.Parse(args); err != nil {
+		return nil, asUsageError(err)
+	}
+	if fs.NArg() > 0 {
+		return nil, usagef("unexpected argument %q", fs.Arg(0))
+	}
+	return f, nil
+}
+
+// runAPI mirrors cli.py's `api` command: foreground serve, -d detach, -s stop.
+func runAPI(args []string) error {
+	f, err := parseAPIFlags(args)
+	if err != nil {
 		return err
 	}
 
-	if stop {
+	if f.stop {
 		return stopDetachedAPI()
 	}
-	if reload {
+	if f.reload {
 		// SPEC §9.8: accepted for CLI compatibility, not implemented.
 		fmt.Fprintln(os.Stderr, "warning: --reload is not supported in the Go port; ignoring")
 	}
-	if detach {
-		return startDetachedAPI(host, port, proxy)
+	if f.detach {
+		return startDetachedAPI(f.host, f.port, f.proxy)
 	}
-	return serveAPI(host, port, proxy)
+	return serveAPI(f.host, f.port, f.proxy)
 }
 
 // serveAPI runs the API server in the foreground with graceful shutdown.
