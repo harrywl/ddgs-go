@@ -179,6 +179,7 @@ registry to upstream's `ENGINES` dict.
 | [docs/SPEC.md](docs/SPEC.md) | Authoritative requirements (§0–§10), including the deliberate divergences in §9 |
 | [docs/GAP-ANALYSIS.md](docs/GAP-ANALYSIS.md) | Per-engine drift evidence against Python ddgs v9.16.0 |
 | [docs/PLAN.md](docs/PLAN.md) | Stream split, merge order, acceptance matrix |
+| [docs/REVIEW-FIX-PLAN.md](docs/REVIEW-FIX-PLAN.md) | Findings from the full-repository review at `ee6a021` and the prioritized fix plan (F1–F21) |
 | [CHANGELOG.md](CHANGELOG.md) | What shipped in `v9.16.0-go.1` |
 
 ## Credits & License
