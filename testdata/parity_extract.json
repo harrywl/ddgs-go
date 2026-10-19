@@ -646,5 +646,22 @@
    "href": "https://en.wikipedia.org/wiki/Go_(programming_language)",
    "body": "Go is a statically typed, compiled high-level programming language."
   }
+ ],
+ "google_wml": [
+  {
+   "title": "Effective Go - The Go Programming Language",
+   "href": "https://go.dev/doc/effective_go",
+   "body": "Effective Go documents style: Write idiomatic code, not only copy a working snippet. go.dev/doc/effective_go"
+  },
+  {
+   "title": "sync package - pkg.go.dev",
+   "href": "https://pkg.go.dev/sync#WaitGroup",
+   "body": "Type WaitGroup - func New - func With - type Pool - type Once."
+  },
+  {
+   "title": "Goroutines are functions launched to run concurrently",
+   "href": "https://example.com/redirected",
+   "body": "Goroutines are functions that are launched to run concurrently with other functions."
+  }
  ]
 }

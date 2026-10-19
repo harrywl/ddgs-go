@@ -6,6 +6,14 @@ package ddgs
 // primp (Rust html2text); here text_markdown uses the battle-tested
 // html-to-markdown library (links, emphasis and tables preserved) and
 // text_plain uses a lightweight DOM walker.
+//
+// FORMAT "text_rich" IS NOT SUPPORTED IN THIS PORT. Python's
+// fmt="text_rich" returns Response.text_rich, which is produced by primp's
+// Rust-side rich-text extractor (a structured, styled text representation
+// with no spec outside primp itself). There is no pure-Go equivalent, so
+// Extract returns ErrUnsupportedFormat (which wraps ErrDDGS) for that format
+// instead of silently degrading to markdown like it does for unknown values.
+// See GAP-ANALYSIS.md M4 and SPEC.md §9.7.
 
 import (
 	"context"
@@ -32,6 +40,11 @@ const (
 	FormatText ExtractFormat = "text"
 	// FormatContent returns the raw response bytes.
 	FormatContent ExtractFormat = "content"
+	// FormatTextRich is the Python "text_rich" format, provided by primp's
+	// Rust extractor. It has no pure-Go equivalent: Extract short-circuits
+	// with ErrUnsupportedFormat for this value (it is deliberately NOT fed
+	// to the markdown fallback used for unknown formats).
+	FormatTextRich ExtractFormat = "text_rich"
 )
 
 // Extracted is the return value of Extract, mirroring the Python
@@ -43,7 +56,18 @@ type Extracted struct {
 }
 
 // Extract fetches a URL and extracts its content. Mirrors DDGS.extract().
+//
+// Divergence from Python (intentional, SPEC §9.7): fmt="text_rich" is
+// rejected up front, before the HTTP request, because the Go port can never
+// produce that payload — Python's branch calls primp's Rust
+// Response.text_rich. Returning ErrUnsupportedFormat early avoids a
+// pointless network round trip; the error wraps ErrDDGS so callers that only
+// filter on the base error keep working.
 func (d *DDGS) Extract(ctx context.Context, rawURL string, format ExtractFormat) (*Extracted, error) {
+	if format == FormatTextRich {
+		return nil, fmt.Errorf("%w: %q requires primp and is not available in the Go port (use %q, %q, %q or %q)",
+			ErrUnsupportedFormat, format, FormatTextMarkdown, FormatTextPlain, FormatText, FormatContent)
+	}
 	client, err := newHTTPClient(d.proxy, d.timeout, d.verify)
 	if err != nil {
 		return nil, err

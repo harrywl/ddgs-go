@@ -86,6 +86,37 @@ func TestYahooExtractURL(t *testing.T) {
 	}
 }
 
+// TestYahooNewsExtractSource pins the D3 fix: the separator is
+// "·" (U+00B7) + TWO spaces + "via Yahoo", byte-identical to Python
+// ddgs/engines/yahoo_news.py::extract_source (`od` shows 302 267 040 040).
+// The previous one-space separator never matched, leaving the suffix on
+// every news source.
+func TestYahooNewsExtractSource(t *testing.T) {
+	// Byte-level pin of the separator constant itself.
+	sepBytes := []byte(yahooNewsSourceSep)
+	want := []byte{0xC2, 0xB7} // U+00B7 MIDDLE DOT in UTF-8
+	if got := sepBytes[1:3]; got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("separator dot bytes = %v, want %v", got, want)
+	}
+	if !strings.HasPrefix(yahooNewsSourceSep, " ") ||
+		!strings.HasPrefix(yahooNewsSourceSep[3:], "  via Yahoo") {
+		t.Errorf("separator = %q, want space + U+00B7 + TWO spaces + \"via Yahoo\"", yahooNewsSourceSep)
+	}
+
+	for _, tc := range []struct{ in, out string }{
+		{"BBC ·  via Yahoo News", "BBC"},
+		{"Reuters ·  via Yahoo", "Reuters"},
+		{"南都 ·  via Yahoo News", "南都"},
+		{"BBC · via Yahoo News", "BBC · via Yahoo News"}, // one space: NOT split (matches Python)
+		{"BBC", "BBC"},                       // no separator: passthrough
+		{"A ·  via Yahoo ·  via Yahoo", "A"}, // maxsplit=1
+	} {
+		if got := yahooNewsExtractSource(tc.in); got != tc.out {
+			t.Errorf("extract_source(%q) = %q, want %q", tc.in, got, tc.out)
+		}
+	}
+}
+
 func TestYahooNewsExtractDate(t *testing.T) {
 	got := yahooNewsExtractDate("2 hours ago")
 	then, err := time.Parse("2006-01-02T15:04:05-07:00", got)

@@ -1,6 +1,6 @@
 package ddgs
 
-// Engine-level parity tests against Python ddgs v9.14.4 golden data.
+// Engine-level parity tests against Python ddgs v9.16.0 golden data.
 // Run by `go test ./...`; exercises the engine factories in registry.go.
 // Data schemas:
 //   - testdata/parity_payloads.json: {engine: [{case:{query,region,safesearch,
@@ -171,9 +171,12 @@ func TestParityExtractResults(t *testing.T) {
 		file    string
 		factory engineFactory
 	}{
-		"ddg_text":   {"ddg_text.html", newDuckduckgoText},
-		"ddg_news":   {"ddg_news.json", newDuckduckgoNews},
-		"ddg_videos": {"ddg_videos.json", newDuckduckgoVideos},
+		"ddg_text":   {"fixtures/ddg_text.html", newDuckduckgoText},
+		"ddg_news":   {"fixtures/ddg_news.json", newDuckduckgoNews},
+		"ddg_videos": {"fixtures/ddg_videos.json", newDuckduckgoVideos},
+		// Google WML (SPEC A2): hand-authored fixture matching the
+		// v9.16.0 items/elements xpaths, incl. noise items.
+		"google_wml": {"google_wml.html", newGoogle},
 	}
 
 	for name, want := range golden {
@@ -183,7 +186,7 @@ func TestParityExtractResults(t *testing.T) {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
-			raw, err := os.ReadFile("testdata/fixtures/" + fx.file)
+			raw, err := os.ReadFile("testdata/" + fx.file)
 			if err != nil {
 				t.Skipf("fixture missing: %v", err)
 			}

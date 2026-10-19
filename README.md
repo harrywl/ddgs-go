@@ -68,18 +68,25 @@ Results are returned as `[]ddgs.Result` where `Result` is
 
 | Function | Available backends |
 |---|---|
-| `Text` | `brave`, `duckduckgo`, `google`, `grokipedia`, `mojeek`, `startpage`, `wikipedia`, `yahoo`, `yandex` |
+| `Text` | `brave`, `duckduckgo`, `google`, `grokipedia`, `mojeek`, `startpage`, `wikipedia`, `yahoo` |
 | `Images` | `bing`, `duckduckgo` |
 | `News` | `bing`, `duckduckgo`, `yahoo` |
 | `Videos` | `duckduckgo` |
 | `Books` | `annasarchive` |
+
+`bing` and `yandex` (text) are disabled upstream (`disabled = True` in
+`ddgs/engines/bing.py` and, since commit f4ba66c / v9.15.0,
+`ddgs/engines/yandex.py`) and are therefore not registered here either; the
+`newYandex` factory code is kept for reference, mirroring the disabled Python
+class. `TestRegistryMatchesPython` pins this key set.
 
 Result semantics match the Python implementation: with `backend: "auto"`
 engines are shuffled, wikipedia/grokipedia are prioritized for text search,
 one request is issued per unique provider, results are deduplicated by URL,
 counted across engines, and ranked (wikipedia first, then title+body match,
 title-only, body-only, neither). Behavior is verified against Python ddgs
-v9.14.4 by golden-vector parity tests (`testdata/`).
+v9.16.0 by golden-vector parity tests (`testdata/`, incl. the Google WML
+fixture `testdata/google_wml.html`).
 
 The scheduler improves on the Python thread-pool waves:
 
@@ -128,6 +135,10 @@ fmt.Println(page.Content)
   [html-to-markdown](https://github.com/JohannesKaufmann/html-to-markdown)
   (links, emphasis and tables preserved as standard CommonMark) rather than
   primp's Rust converter; output is richer but not byte-identical.
+- `Extract` format `"text_rich"` (Python: `ddgs.extract(url, fmt="text_rich")`)
+  is produced by primp's Rust rich-text extractor and has no pure-Go
+  equivalent: `d.Extract(ctx, url, ddgs.FormatTextRich)` returns
+  `ddgs.ErrUnsupportedFormat` (wraps `ErrDDGS`, testable with `errors.Is`).
 - The auto-mode scheduler streams results and cancels early (see Engines);
   the Python version waits on thread-pool waves.
 - The CLI / API server / MCP server of the Python package are out of scope;

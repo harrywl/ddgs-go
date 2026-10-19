@@ -25,39 +25,58 @@ func randInt(min, max int64) int64 {
 	return min + n.Int64()
 }
 
-// googleUA returns one random Android Google App User-Agent string,
-// mirroring ddgs.engines.google.get_ua (including the "NSTNWV" suffix).
-func googleUA() string {
-	devices := []struct {
-		androidVer, device   string
-		chromeMin, chromeMax int64
-	}{
-		{"5.0", "SM-G900P Build/LRX21T", 39, 60},
-		{"6.0", "Nexus 5 Build/MRA58N", 39, 60},
-		{"8.0", "Pixel 2 Build/OPD3.170816.012", 39, 60},
+// googleFirmwares and googleUCVersions mirror the tuples in
+// ddgs.engines.google.get_ua. The firmware/UC-version pools are exact —
+// Google's WML endpoint only serves results to this short list of legacy
+// Nokia/Symbian + UC Browser identifiers.
+var (
+	googleFirmwares = []string{
+		"2.0617.1.0.3",
+		"2.0625.2.0.2",
+		"2.0635.2.0.2",
+		"5.0706.4.0.1",
+		"5.0819.4.0.1",
 	}
-	d := devices[randInt(0, int64(len(devices)-1))]
-	return fmt.Sprintf(
-		"Mozilla/5.0 (Linux; Android %s; %s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.%d.%d Mobile Safari/537.36NSTNWV",
-		d.androidVer, d.device,
-		randInt(d.chromeMin, d.chromeMax), randInt(1000, 9999), randInt(1000, 1999),
-	)
+	googleUCVersions = []string{"7.9.1.120", "7.9.1.121", "7.9.1.122"}
+)
+
+// googleWMLUA returns one Nokia/UC WML User-Agent string, mirroring
+// ddgs.engines.google.get_ua:
+//
+//	NokiaN72/{firmware} Series60/2.8 Profile/MIDP-2.0 Configuration/CLDC-1.1
+//	[.../UC Browser{uc_version}/27/351/UCWEB]   (appended with p=0.5)
+//
+// Python fixes the UA once at class-import time (headers_update is evaluated
+// at class definition). In Go the UA is generated once per engine instance in
+// newGoogle — equivalent, because DDGS caches engine instances (see
+// DDGS.enginesCache), so a given instance keeps one UA for its lifetime, just
+// like the Python class attribute.
+func googleWMLUA() string {
+	firmware := googleFirmwares[randInt(0, int64(len(googleFirmwares)-1))]
+	ua := "NokiaN72/" + firmware + " Series60/2.8 Profile/MIDP-2.0 Configuration/CLDC-1.1"
+	if randInt(0, 1) == 1 { // random.choice((True, False))
+		ua += "/UC Browser" + googleUCVersions[randInt(0, int64(len(googleUCVersions)-1))] + "/27/351/UCWEB"
+	}
+	return ua
 }
 
-// newGoogle mirrors ddgs.engines.google.Google.
+// newGoogle mirrors ddgs.engines.google.Google (rewritten upstream in commit
+// 3ea6cbc, 2026-08-26 for ddgs v9.16.0): the legacy WML (Wireless Markup
+// Language, i.e. feature-phone) endpoint, which serves a static XHTML
+// document — no JS, no TLS fingerprinting gate.
 func newGoogle(proxy string, timeout time.Duration, verify Verify) (searchEngine, error) {
 	e, err := newBaseEngine(engineSpec{
 		name:          "google",
 		category:      "text",
 		provider:      "google",
-		searchURL:     "https://www.google.com/search",
+		searchURL:     "https://www.google.com/wml/search",
 		searchMethod:  "GET",
-		headersUpdate: map[string]string{"User-Agent": googleUA()},
-		itemsXPath:    "//div[@data-hveid][.//h3]",
+		headersUpdate: map[string]string{"User-Agent": googleWMLUA()},
+		itemsXPath:    "//div[./div[1]/a and ./div[2][table]]",
 		elementsXPath: map[string]string{
-			"title": ".//h3//text()",
-			"href":  ".//a[.//h3]/@href",
-			"body":  "./div/div[last()]//text()",
+			"title": "./div[a]/a/span[1]/text()",
+			"href":  "./div[a]/a/@href",
+			"body":  "./div[2][table]//text()",
 		},
 	}, proxy, timeout, verify)
 	if err != nil {
@@ -66,36 +85,80 @@ func newGoogle(proxy string, timeout time.Duration, verify Verify) (searchEngine
 	e.buildPayload = func(_ context.Context, p searchParams) (map[string]string, error) {
 		e.http.setCookies("https://google.com", map[string]string{"CONSENT": "YES+"})
 		safesearch := map[string]string{"on": "2", "moderate": "1", "off": "0"}
-		country, lang := splitRegion(p.Region)
+		start := (p.Page - 1) * 10
 		payload := map[string]string{
-			"q":      p.Query,
-			"filter": safesearch[strings.ToLower(p.SafeSearch)],
-			"start":  strconv.Itoa((p.Page - 1) * 10),
-			"hl":     fmt.Sprintf("%s-%s", lang, strings.ToUpper(country)),
-			"lr":     "lang_" + lang,
-			"cr":     "country" + strings.ToUpper(country),
+			"q":       p.Query,
+			"sca_esv": "1",
+			"filter":  safesearch[strings.ToLower(p.SafeSearch)],
+			"start":   strconv.Itoa(start),
 		}
+		// Python: `country, lang = region.split("-")` — a RAW split with no
+		// lowercasing (unlike splitRegion, which other engines use and which
+		// does ToLower). hl/lr preserve the lang casing of the region string
+		// as-is; only the country gets .upper(). Mirrored byte-exactly here,
+		// so region "US-EN" yields hl "EN-US", lr "lang_EN", cr "countryUS".
+		country, lang, err := splitRawRegion(p.Region)
+		if err != nil {
+			return nil, err
+		}
+		payload["hl"] = lang + "-" + strings.ToUpper(country) // interface language
+		payload["lr"] = "lang_" + lang                        // results in this language
+		payload["cr"] = "country" + strings.ToUpper(country)  // results from this country
 		if p.TimeLimit != "" {
 			payload["tbs"] = "qdr:" + p.TimeLimit
 		}
 		return payload, nil
+	}
+	// preProcessHTML mirrors Google.pre_process_html exactly:
+	// `return html_text[html_text.find("?>"):]`. The WML response starts with
+	// an `<?xml ... ?>` declaration; slicing from the first "?>" drops
+	// everything up to and including the prolog's closing marker.
+	//
+	// Python quirk (preserved deliberately): str.find() returns -1 when "?>
+	// is absent, and text[-1:] is the LAST CHARACTER ONLY — not the whole
+	// string. So a response with no "?>" collapses to a single trailing
+	// character and yields zero results. Go's strings.Index returns -1 too,
+	// so the same slice semantics are reproduced explicitly here.
+	e.preProcessHTML = func(text string) string {
+		if i := strings.Index(text, "?>"); i >= 0 {
+			return text[i:]
+		}
+		// Python: html_text[-1:]
+		if len(text) > 0 {
+			return text[len(text)-1:]
+		}
+		return text
 	}
 	e.postExtract = func(results []Result) []Result {
 		out := make([]Result, 0, len(results))
 		for _, r := range results {
 			href := r.getString("href")
 			if strings.HasPrefix(href, "/url?q=") {
-				href = strings.SplitN(strings.SplitN(href, "?q=", 2)[1], "&", 2)[0]
+				// Python: result.href.split("?q=")[1].split("&")[0].split("?")[0]
+				href = strings.SplitN(strings.SplitN(strings.SplitN(href, "?q=", 2)[1], "&", 2)[0], "?", 2)[0]
 				r.Set("href", href)
-				href = r.getString("href")
 			}
-			if r.getString("title") != "" && strings.HasPrefix(href, "http") {
+			if r.getString("title") != "" && strings.HasPrefix(r.getString("href"), "http") {
 				out = append(out, r)
 			}
 		}
 		return out
 	}
 	return e, nil
+}
+
+// splitRawRegion mirrors Python `country, lang = region.split("-")` — no
+// case folding and no tolerance for extra hyphen-separated parts (Python
+// raises ValueError while unpacking). splitRegion stays for the engines that
+// already pass against the older golden data.
+func splitRawRegion(region string) (country, lang string, err error) {
+	parts := strings.Split(region, "-")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf(
+			"%w: invalid region %q: expected \"{country}-{lang}\" (e.g. \"us-en\")",
+			ErrDDGS, region)
+	}
+	return parts[0], parts[1], nil
 }
 
 // newBrave mirrors ddgs.engines.brave.Brave.
@@ -247,7 +310,10 @@ func newYahoo(proxy string, timeout time.Duration, verify Verify) (searchEngine,
 	return e, nil
 }
 
-// newYandex mirrors ddgs.engines.yandex.Yandex.
+// newYandex mirrors ddgs.engines.yandex.Yandex. The upstream class sets
+// `disabled = True` (commit f4ba66c, 2026-08-16), so this factory is kept for
+// reference — exactly like the disabled Python class — but is NOT registered
+// in engineRegistry and can never be selected as a backend.
 func newYandex(proxy string, timeout time.Duration, verify Verify) (searchEngine, error) {
 	e, err := newBaseEngine(engineSpec{
 		name:         "yandex",

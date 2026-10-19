@@ -227,6 +227,7 @@
    },
    "payload": {
     "q": "golang test",
+    "sca_esv": "1",
     "filter": "1",
     "start": "0",
     "hl": "en-US",
@@ -244,6 +245,7 @@
    },
    "payload": {
     "q": "golang test",
+    "sca_esv": "1",
     "filter": "2",
     "start": "10",
     "hl": "de-DE",
@@ -262,6 +264,7 @@
    },
    "payload": {
     "q": "golang test",
+    "sca_esv": "1",
     "filter": "0",
     "start": "20",
     "hl": "en-US",

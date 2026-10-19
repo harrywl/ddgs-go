@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?><html><head><title>golang concurrency - Google Search</title></head><body>
+<!-- Hand-authored fixture mirroring the shape of https://www.google.com/wml/search
+     (ddgs v9.16.0 Google engine). Structure required by the xpaths:
+       items:    //div[./div[1]/a and ./div[2][table]]
+       title:    ./div[a]/a/span[1]/text()
+       href:     ./div[a]/a/@href
+       body:     ./div[2][table]//text()
+     i.e. each result item = <div> <div><a><span>title</span></a></div> <div><table>body</table></div> </div> -->
+<div>
+  <div><a href="/url?q=https://go.dev/doc/effective_go&amp;sa=U&amp;ved=0ahUKEwi_">
+      <span>Effective Go - The Go Programming Language</span></a></div>
+  <div><table><tr><td>
+    <span>Effective Go documents style: Write idiomatic code, not only copy a working snippet.</span>
+    <br/>go.dev&#8206;/doc&#8206;/effective_go
+  </td></tr></table></div>
+</div>
+<div>
+  <div><a href="https://pkg.go.dev/sync#WaitGroup"><span>sync package - pkg.go.dev</span></a></div>
+  <div><table><tr><td>Type WaitGroup - func New - func With - type Pool - type Once.</td></tr></table></div>
+</div>
+<div>
+  <div><a href="https://example.com/redirected"><span>Goroutines are functions launched to run concurrently</span></a></div>
+  <div><table><tr><td>Goroutines are functions that are launched to run concurrently with other functions.</td></tr></table></div>
+</div>
+<!-- noise: no table in div[2] -> must not match items_xpath -->
+<div>
+  <div><a href="https://ads.example.com/spam"><span>-sponsored result</span></a></div>
+  <div>no table here</div>
+</div>
+<!-- noise: relative protocol-less href -> dropped by post_extract_results -->
+<div>
+  <div><a href="/search?q=golang&amp;sa=X"><span>Google Search - another SERP link</span></a></div>
+  <div><table><tr><td>should be filtered out because href does not start with http</td></tr></table></div>
+</div>
+</body></html>

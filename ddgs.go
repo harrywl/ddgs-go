@@ -101,7 +101,7 @@ type DDGS struct {
 	threads int
 
 	mu           sync.Mutex
-	enginesCache map[string]searchEngine // key: category+"/"+name
+	enginesCache map[string]searchEngine  // key: category+"/"+name
 	engineHealth map[string]*engineHealth // key: category+"/"+name
 }
 

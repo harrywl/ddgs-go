@@ -202,6 +202,17 @@ func yahooNewsExtractURL(u string) string {
 	return normalizeURL(strings.ReplaceAll(t, "+", " "))
 }
 
+// yahooNewsSourceSep is the separator Python's yahoo_news.extract_source
+// splits on: U+00B7 MIDDLE DOT + TWO spaces + "via Yahoo" (byte-verified with
+// od against ddgs/engines/yahoo_news.py: `302 267 040 040 v i a`).
+const yahooNewsSourceSep = " ·  via Yahoo"
+
+// yahooNewsExtractSource mirrors ddgs.engines.yahoo_news.extract_source:
+// `s.split(" ·  via Yahoo", maxsplit=1)[0]`.
+func yahooNewsExtractSource(s string) string {
+	return strings.SplitN(s, yahooNewsSourceSep, 2)[0]
+}
+
 // newYahooNews mirrors ddgs.engines.yahoo_news.YahooNews.
 func newYahooNews(proxy string, timeout time.Duration, verify Verify) (searchEngine, error) {
 	e, err := newBaseEngine(engineSpec{
@@ -245,7 +256,9 @@ func newYahooNews(proxy string, timeout time.Duration, verify Verify) (searchEng
 				}
 			}
 			if src := r.getString("source"); src != "" {
-				r.Set("source", strings.SplitN(src, " · via Yahoo", 2)[0])
+				// extract_source (Python): two-space separator, see
+				// yahooNewsSourceSep above for the byte-level verification.
+				r.Set("source", yahooNewsExtractSource(src))
 			}
 		}
 		return results
