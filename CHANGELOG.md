@@ -69,7 +69,9 @@ ported the library core against upstream ~2026-07-30 (pre-v9.15.0).
 | `go vet ./...` | clean |
 | `go build ./...` | green (3 binaries) |
 | `go test ./...` | pass |
-| `go test -race ./...` | not runnable under PRoot (TSan: unsupported VMA range) — runs in CI |
+| `go test -race ./...` | not runnable under PRoot (TSan: unsupported VMA range); **passes in CI** on ubuntu + macos, go 1.25 and 1.27 |
+| CI matrix (2 OS × 2 Go) | gofmt / vet / build / unit / race — all green |
+| CI `integration` job (live network) | green |
 | live smoke: `ddgs text` / API `POST /search/text` | results returned |
 | live smoke: `backend=google` | no results — **matches** Python ddgs 9.16.0 at the same moment (engine-side, not a port defect) |
 
